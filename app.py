@@ -1,6 +1,9 @@
 import os
 import re
 import subprocess
+import uuid
+import shutil
+import threading
 from flask import Flask, request, Response, jsonify
 
 app = Flask(__name__)
@@ -14,7 +17,7 @@ def add_cors_headers(response):
     return response
 
 
-@app.route("/", methods=["GET", "OPTIONS"])
+@app.route("/", methods=["GET"])
 def index():
     return jsonify({"status": "ok", "message": "MP3 Stream API is running."})
 
@@ -23,17 +26,18 @@ def index():
 def debug_info():
     ytdlp  = subprocess.run(["yt-dlp",  "--version"], capture_output=True, text=True)
     ffmpeg = subprocess.run(["ffmpeg", "-version"],   capture_output=True, text=True)
-    tmp_ok = True
+    # 測試 /tmp 可寫
     try:
-        path = "/tmp/_test.txt"
-        open(path, "w").close()
-        os.remove(path)
+        p = "/tmp/_writetest.txt"
+        with open(p, "w") as f: f.write("ok")
+        os.remove(p)
+        tmp_ok = True
     except Exception as e:
         tmp_ok = str(e)
     return jsonify({
-        "yt-dlp":  ytdlp.stdout.strip(),
-        "ffmpeg":  ffmpeg.returncode == 0,
-        "/tmp ok": tmp_ok,
+        "yt-dlp version": ytdlp.stdout.strip(),
+        "ffmpeg available": ffmpeg.returncode == 0,
+        "/tmp writable": tmp_ok,
     })
 
 
@@ -55,60 +59,96 @@ def stream_mp3():
     if not is_valid_youtube_url(url):
         return jsonify({"error": "無效的 YouTube 網址"}), 400
 
-    # ── 用兩個 subprocess pipe 串接：
-    #    yt-dlp 下載原始音訊 → stdout
-    #    ffmpeg 即時轉 mp3  → stdout → Flask 串流給瀏覽器
-    # 這樣不需要存暫存檔，也不用等整首下載完 ──
+    # 每次請求用獨立子目錄，避免衝突
+    tmp_dir  = f"/tmp/mp3_{uuid.uuid4().hex[:10]}"
+    mp3_path = os.path.join(tmp_dir, "out.mp3")
+
+    try:
+        os.makedirs(tmp_dir, exist_ok=True)
+    except Exception as e:
+        return jsonify({"error": f"無法建立暫存目錄: {e}"}), 500
+
+    # ── Step 1：yt-dlp 下載最佳音訊，存為原始格式 ──
+    raw_path = os.path.join(tmp_dir, "raw.%(ext)s")
+    dl_cmd = [
+        "yt-dlp",
+        "--no-playlist",
+        "--format", "bestaudio/best",
+        "--no-warnings",
+        "--output", raw_path,
+        url,
+    ]
+
+    try:
+        dl_result = subprocess.run(dl_cmd, capture_output=True, timeout=180)
+    except subprocess.TimeoutExpired:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return jsonify({"error": "下載逾時"}), 504
+
+    if dl_result.returncode != 0:
+        err = dl_result.stderr.decode("utf-8", errors="replace")
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return jsonify({"error": "yt-dlp 下載失敗", "detail": err[:500]}), 500
+
+    # 找到下載的原始檔（副檔名不固定）
+    raw_files = [f for f in os.listdir(tmp_dir)]
+    if not raw_files:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return jsonify({"error": "找不到下載的檔案"}), 500
+
+    raw_file = os.path.join(tmp_dir, raw_files[0])
+
+    # ── Step 2：ffmpeg 轉成 MP3 ──
+    ff_cmd = [
+        "ffmpeg",
+        "-y",                    # 覆寫輸出
+        "-i", raw_file,          # 輸入：下載的原始音訊檔
+        "-vn",                   # 不要影像
+        "-acodec", "libmp3lame",
+        "-q:a", "5",
+        mp3_path,                # 輸出：MP3 檔案
+    ]
+
+    try:
+        ff_result = subprocess.run(ff_cmd, capture_output=True, timeout=120)
+    except subprocess.TimeoutExpired:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return jsonify({"error": "轉檔逾時"}), 504
+
+    if ff_result.returncode != 0:
+        err = ff_result.stderr.decode("utf-8", errors="replace")
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return jsonify({"error": "ffmpeg 轉檔失敗", "detail": err[-500:]}), 500
+
+    if not os.path.exists(mp3_path) or os.path.getsize(mp3_path) == 0:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+        return jsonify({"error": "MP3 輸出為空"}), 500
+
+    # ── Step 3：串流 MP3 給前端，結束後背景刪除 ──
+    file_size = os.path.getsize(mp3_path)
 
     def generate():
-        # Step 1：yt-dlp 下載最佳音訊格式，輸出到 stdout（原始容器格式）
-        ytdlp_proc = subprocess.Popen(
-            [
-                "yt-dlp",
-                "--no-playlist",
-                "--format", "bestaudio/best",
-                "--no-warnings",
-                "--output", "-",        # 輸出到 stdout（原始格式，不轉檔）
-                url,
-            ],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-        )
-
-        # Step 2：ffmpeg 從 stdin 讀取，即時轉成 MP3 輸出到 stdout
-        ffmpeg_proc = subprocess.Popen(
-            [
-                "ffmpeg",
-                "-i", "pipe:0",         # 從 stdin 讀
-                "-vn",                  # 不要影像
-                "-acodec", "libmp3lame",
-                "-q:a", "5",            # 品質（0最好，9最差）
-                "-f", "mp3",
-                "pipe:1",               # 輸出到 stdout
-            ],
-            stdin=ytdlp_proc.stdout,    # 接 yt-dlp 的 stdout
-            stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,
-        )
-
-        # yt-dlp stdout 已交給 ffmpeg，關掉父程序的參考
-        ytdlp_proc.stdout.close()
-
         try:
-            while True:
-                chunk = ffmpeg_proc.stdout.read(8192)
-                if not chunk:
-                    break
-                yield chunk
+            with open(mp3_path, "rb") as f:
+                while True:
+                    chunk = f.read(65536)
+                    if not chunk:
+                        break
+                    yield chunk
         finally:
-            ffmpeg_proc.stdout.close()
-            ffmpeg_proc.wait()
-            ytdlp_proc.wait()
+            threading.Thread(
+                target=shutil.rmtree,
+                args=(tmp_dir,),
+                kwargs={"ignore_errors": True},
+                daemon=True,
+            ).start()
 
     resp = Response(generate(), mimetype="audio/mpeg")
+    resp.headers["Content-Length"]      = file_size   # 告訴瀏覽器總大小，進度條才會動
     resp.headers["Content-Disposition"] = "inline"
     resp.headers["Cache-Control"]       = "no-cache"
     resp.headers["X-Accel-Buffering"]   = "no"
+    resp.headers["Accept-Ranges"]       = "bytes"
     return resp
 
 
