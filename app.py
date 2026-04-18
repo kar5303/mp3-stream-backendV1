@@ -46,8 +46,9 @@ def test_download():
     raw_path = os.path.join(tmp_dir, "raw.%(ext)s")
 
     result = subprocess.run(
-        ["yt-dlp", "--no-playlist", "--format", "bestaudio/best",
-         "--extractor-args", "youtube:player_client=web",
+        ["yt-dlp", "--no-playlist",
+         "--extractor-args", "youtube:player_client=tv_embedded",
+         "--format", "bestaudio/best",
          "--output", raw_path, url],
         capture_output=True, timeout=120
     )
@@ -92,8 +93,9 @@ def stream_mp3():
 
     # Step 1: download
     dl = subprocess.run(
-        ["yt-dlp", "--no-playlist", "--format", "bestaudio/best",
-         "--extractor-args", "youtube:player_client=web",
+        ["yt-dlp", "--no-playlist",
+         "--extractor-args", "youtube:player_client=tv_embedded",
+         "--format", "bestaudio/best",
          "--no-warnings", "--output", raw_path, url],
         capture_output=True, timeout=180
     )
