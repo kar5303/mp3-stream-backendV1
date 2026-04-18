@@ -1,7 +1,7 @@
 import os
 import re
 import subprocess
-import tempfile
+import uuid
 import threading
 from flask import Flask, request, Response, jsonify
 
@@ -36,8 +36,10 @@ def stream_mp3():
     if not is_valid_youtube_url(url):
         return jsonify({"error": "無效的 YouTube 網址"}), 400
 
-    # 建立暫存目錄，yt-dlp 先把 MP3 存到這裡
-    tmp_dir  = tempfile.mkdtemp()
+    # Render 免費版 /tmp 是可寫的（tmpfs），其他目錄唯讀
+    tmp_id   = str(uuid.uuid4())[:8]
+    tmp_dir  = f"/tmp/{tmp_id}"
+    os.makedirs(tmp_dir, exist_ok=True)
     out_tmpl = os.path.join(tmp_dir, "audio.%(ext)s")
     mp3_path = os.path.join(tmp_dir, "audio.mp3")
 
@@ -57,47 +59,52 @@ def stream_mp3():
         result = subprocess.run(
             cmd,
             capture_output=True,
-            timeout=120,   # 最多等 2 分鐘
+            timeout=180,
         )
-        if result.returncode != 0:
-            err = result.stderr.decode("utf-8", errors="replace")
-            print("yt-dlp error:", err)
-            return jsonify({"error": "下載失敗", "detail": err[:300]}), 500
-
-        if not os.path.exists(mp3_path):
-            # 有些格式副檔名不同，找找看
-            files = os.listdir(tmp_dir)
-            if not files:
-                return jsonify({"error": "找不到輸出檔案"}), 500
-            mp3_path = os.path.join(tmp_dir, files[0])
-
     except subprocess.TimeoutExpired:
-        return jsonify({"error": "下載逾時"}), 504
+        return jsonify({"error": "下載逾時，請稍後再試"}), 504
 
-    # 串流回傳 MP3，結束後刪除暫存檔
+    if result.returncode != 0:
+        err = result.stderr.decode("utf-8", errors="replace")
+        print("yt-dlp stderr:", err)
+        # 清理
+        _cleanup(tmp_dir)
+        return jsonify({"error": "yt-dlp 失敗", "detail": err[:400]}), 500
+
+    # 找到產出的音訊檔（副檔名可能不是 .mp3）
+    try:
+        files = [f for f in os.listdir(tmp_dir) if os.path.isfile(os.path.join(tmp_dir, f))]
+        if not files:
+            return jsonify({"error": "找不到輸出音訊檔"}), 500
+        audio_path = os.path.join(tmp_dir, files[0])
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
     def generate():
         try:
-            with open(mp3_path, "rb") as f:
+            with open(audio_path, "rb") as f:
                 while True:
-                    chunk = f.read(8192)
+                    chunk = f.read(65536)   # 64KB chunks
                     if not chunk:
                         break
                     yield chunk
         finally:
-            # 串流完成後背景刪除暫存
-            def cleanup():
-                try:
-                    os.remove(mp3_path)
-                    os.rmdir(tmp_dir)
-                except Exception:
-                    pass
-            threading.Thread(target=cleanup, daemon=True).start()
+            threading.Thread(target=_cleanup, args=(tmp_dir,), daemon=True).start()
 
     resp = Response(generate(), mimetype="audio/mpeg")
     resp.headers["Content-Disposition"] = "inline"
     resp.headers["Cache-Control"]       = "no-cache"
     resp.headers["X-Accel-Buffering"]   = "no"
     return resp
+
+
+def _cleanup(path):
+    """刪除暫存目錄"""
+    import shutil
+    try:
+        shutil.rmtree(path, ignore_errors=True)
+    except Exception:
+        pass
 
 
 @app.route("/info", methods=["GET"])
