@@ -1,8 +1,8 @@
 FROM python:3.12-slim
 
-# 安裝 ffmpeg
+# 安裝 ffmpeg + nodejs（yt-dlp 需要 JS runtime 解析 YouTube）
 RUN apt-get update && \
-    apt-get install -y ffmpeg && \
+    apt-get install -y ffmpeg nodejs && \
     apt-get clean && \
     rm -rf /var/lib/apt/lists/*
 
@@ -10,11 +10,11 @@ WORKDIR /app
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
+# 確保 yt-dlp 是最新版
 RUN pip install --no-cache-dir --upgrade yt-dlp
 
 COPY . .
 
-# Render 使用 port 10000
 ENV PORT=10000
 EXPOSE 10000
 
