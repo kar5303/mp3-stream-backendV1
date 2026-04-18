@@ -47,6 +47,7 @@ def test_download():
 
     result = subprocess.run(
         ["yt-dlp", "--no-playlist", "--format", "bestaudio/best",
+         "--extractor-args", "youtube:player_client=web",
          "--output", raw_path, url],
         capture_output=True, timeout=120
     )
@@ -92,6 +93,7 @@ def stream_mp3():
     # Step 1: download
     dl = subprocess.run(
         ["yt-dlp", "--no-playlist", "--format", "bestaudio/best",
+         "--extractor-args", "youtube:player_client=web",
          "--no-warnings", "--output", raw_path, url],
         capture_output=True, timeout=180
     )
@@ -148,4 +150,4 @@ def stream_mp3():
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 10000))
-    app.run(host="0.0.0.0", port=port, debug=False) 
+    app.run(host="0.0.0.0", port=port, debug=False)
