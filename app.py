@@ -55,13 +55,30 @@ def test_download():
 
     files = os.listdir(tmp_dir)
     sizes = {f: os.path.getsize(os.path.join(tmp_dir, f)) for f in files}
+
+    ff_returncode = None
+    ff_err = ""
+    if files:
+        raw_file = os.path.join(tmp_dir, files[0])
+        mp3_path = os.path.join(tmp_dir, "out.mp3")
+        ff = subprocess.run(
+            ["ffmpeg", "-y", "-i", raw_file, "-vn",
+             "-acodec", "libmp3lame", "-q:a", "5", mp3_path],
+            capture_output=True, timeout=120
+        )
+        ff_returncode = ff.returncode
+        ff_err = ff.stderr.decode("utf-8", errors="replace")[-800:]
+        if os.path.exists(mp3_path):
+            sizes["out.mp3"] = os.path.getsize(mp3_path)
+
     shutil.rmtree(tmp_dir, ignore_errors=True)
 
     return jsonify({
-        "returncode": result.returncode,
-        "stdout": result.stdout.decode("utf-8", errors="replace")[-800:],
-        "stderr": result.stderr.decode("utf-8", errors="replace")[-800:],
+        "yt_returncode": result.returncode,
+        "yt_stderr": result.stderr.decode("utf-8", errors="replace")[-400:],
         "files_found": sizes,
+        "ff_returncode": ff_returncode,
+        "ff_stderr": ff_err,
     })
 
 
